@@ -7,7 +7,6 @@ PORT = 9999
 
 
 def receive_messages(conn: socket.socket):
-    """Continuously listen for incoming messages from the server."""
     while True:
         try:
             data = conn.recv(1024)

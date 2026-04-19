@@ -4,12 +4,12 @@ import threading
 HOST = '127.0.0.1'
 PORT = 9999
 
-clients = []  # list of (conn, addr) tuples
+clients = []
 lock = threading.Lock()
 
 
 def broadcast(message: bytes, sender_conn=None):
-    """Send a message to all connected clients except the sender."""
+
     with lock:
         for conn, addr in clients:
             if conn is not sender_conn:
