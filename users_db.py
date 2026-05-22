@@ -116,7 +116,11 @@ def StartRegister(username,password,email):
 
     save_users(users)
 
-    send_email(email,"Verification code",code)
+    print(f"[SIGNUP CODE] {username} → {code}")   # always visible in server console
+    try:
+        send_email(email, "Verification code", code)
+    except Exception as e:
+        print(f"[EMAIL ERROR] Could not send email: {e}")
 
     return True
 
@@ -165,7 +169,11 @@ def StartReset(email):
 
             save_users(users)
 
-            send_email(email,"Reset code",code)
+            print(f"[RESET CODE] {username} → {code}")
+            try:
+                send_email(email, "Reset code", code)
+            except Exception as e:
+                print(f"[EMAIL ERROR] Could not send email: {e}")
 
             return True
 

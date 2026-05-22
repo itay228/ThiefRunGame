@@ -10,8 +10,8 @@ from users_db import IsUserExist, IsPasswordOK, StartRegister, VerifyRegister, S
 from crypto import aes_encrypt, aes_decrypt, rsa_generate_keys, rsa_decrypt, rsa_keys_exist, save_rsa_keys, load_rsa_keys
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-HOST   = "0.0.0.0"   # listen on all network interfaces
-PORT   = 5555
+HOST = "0.0.0.0"   # listen on all network interfaces
+PORT = 5555
 PEPPER = "P3P3P3ER"
 
 MAX_PER_SIDE   = 5   # max 5 thieves or 5 cops
@@ -274,39 +274,47 @@ class GameRoom:
 # This function checks if we can start a game with the people waiting.
 #
 
+def _launch_game(chosen_thieves, chosen_cops):
+    """Remove chosen players from queue and start a GameRoom."""
+    for p in list(queue):
+        if p["username"] in chosen_thieves + chosen_cops:
+            queue.remove(p)
+
+    room = GameRoom(chosen_thieves, chosen_cops)
+    active_games.append(room)
+
+    for name in chosen_thieves + chosen_cops:
+        role = "thief" if name in chosen_thieves else "cop"
+        if name in players:
+            p = players[name]
+            send_msg(p["socket"], f"GAME_START|{role}", p["aes_key"])
+
+
 def try_start_game():
     """
-    Look at the queue. If we have at least 1 thief and 1 cop
-    and the team sizes are within 2 of each other — start a game!
+    Start a game if:
+    - 5 players on EACH side → auto-start all of them, or
+    - At least 1 READY thief AND 1 READY cop → start with ready players only
     """
-    thieves_waiting = [p["username"] for p in queue if p["role"] == "thief"]
-    cops_waiting    = [p["username"] for p in queue if p["role"] == "cop"]
+    thieves = [p for p in queue if p["role"] == "thief"]
+    cops    = [p for p in queue if p["role"] == "cop"]
 
-    t = len(thieves_waiting)
-    c = len(cops_waiting)
+    # Auto-start: 5 on each side
+    if len(thieves) >= MAX_PER_SIDE and len(cops) >= MAX_PER_SIDE:
+        _launch_game(
+            [p["username"] for p in thieves[:MAX_PER_SIDE]],
+            [p["username"] for p in cops[:MAX_PER_SIDE]],
+        )
+        return
 
-    # Need at least 1 of each and difference ≤ 2
-    if t >= 1 and c >= 1 and abs(t - c) <= MAX_TEAM_DIFF:
-        # Take up to 5 from each side
-        chosen_thieves = thieves_waiting[:MAX_PER_SIDE]
-        chosen_cops    = cops_waiting[:MAX_PER_SIDE]
-
-        # Remove them from the queue
-        for p in list(queue):
-            if p["username"] in chosen_thieves + chosen_cops:
-                queue.remove(p)
-
-        # Create the game room (this starts the game loop)
-        room = GameRoom(chosen_thieves, chosen_cops)
-        active_games.append(room)
-
-        # Tell each player the game is starting
-        for name in chosen_thieves + chosen_cops:
-            role = "thief" if name in chosen_thieves else "cop"
-            with lock:
-                if name in players:
-                    p = players[name]
-                    send_msg(p["socket"], f"GAME_START|{role}", p["aes_key"])
+    # Ready-start: at least 1 ready on each side
+    t_ready = [p for p in thieves if p.get("ready")]
+    c_ready = [p for p in cops    if p.get("ready")]
+    if t_ready and c_ready:
+        _launch_game(
+            [p["username"] for p in t_ready],
+            [p["username"] for p in c_ready],
+        )
 
 
 def get_lobby_data(username):
@@ -322,12 +330,21 @@ def get_lobby_data(username):
 
 def get_queue_update():
     """
-    Build a message describing who is currently in the queue.
-    Sent to all queued players so they can see the waiting room.
+    Build a message describing who is in the queue and who is ready.
+    Each player is sent as {"name": ..., "ready": true/false}.
     """
-    thieves = [p["username"] for p in queue if p["role"] == "thief"]
-    cops    = [p["username"] for p in queue if p["role"] == "cop"]
+    thieves = [{"name": p["username"], "ready": p.get("ready", False)} for p in queue if p["role"] == "thief"]
+    cops    = [{"name": p["username"], "ready": p.get("ready", False)} for p in queue if p["role"] == "cop"]
     return f"QUEUE_UPDATE|{json.dumps({'thieves': thieves, 'cops': cops})}"
+
+
+def broadcast_queue_update():
+    """Send the current queue state to every player in the queue."""
+    update = get_queue_update()
+    for p in queue:
+        if p["username"] in players:
+            pp = players[p["username"]]
+            send_msg(pp["socket"], update, pp["aes_key"])
 
 
 # ── Client Handler ────────────────────────────────────────────────────────────
@@ -462,24 +479,25 @@ def handle_client(client_socket):
                     continue
 
                 with lock:
-                    # Remove if already in queue
                     for p in list(queue):
                         if p["username"] == username:
                             queue.remove(p)
-                    queue.append({"username": username, "role": role})
+                    queue.append({"username": username, "role": role, "ready": False})
 
                 send_msg(client_socket, "QUEUE_JOINED", aes_key)
 
-                # Tell everyone in queue about the update
                 with lock:
-                    update = get_queue_update()
-                    for p in queue:
-                        if p["username"] in players:
-                            pp = players[p["username"]]
-                            send_msg(pp["socket"], update, pp["aes_key"])
+                    broadcast_queue_update()
+                    try_start_game()
 
-                # Try to start a game now
+            elif command == "READY":
+                # Player clicked the Ready button
                 with lock:
+                    for p in queue:
+                        if p["username"] == username:
+                            p["ready"] = True
+                            break
+                    broadcast_queue_update()
                     try_start_game()
 
             elif command == "LEAVE_QUEUE":
@@ -487,6 +505,7 @@ def handle_client(client_socket):
                     for p in list(queue):
                         if p["username"] == username:
                             queue.remove(p)
+                    broadcast_queue_update()
                 send_msg(client_socket, "QUEUE_LEFT", aes_key)
 
             # ── IN-GAME ───────────────────────────────────────────────────────
